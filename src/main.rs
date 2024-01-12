@@ -1,15 +1,16 @@
 // Simulates orbit of a small body around the earth
 use bevy::prelude::*;
 use bevy::render::camera::ScalingMode;
+use std::ops;
 
 type Precision = f64;
 
 const G: Precision = 6.6743e-11; // m3 kg-1 s-2
 const MASS_EARTH: Precision = 5.972e24;
 const EARTH_RADIUS: Precision = 6.371e6;
-const DT: Precision = 7.0; // 1 second
+const DT: Precision = 10.0; // 1 second
 const N_HISTORY: usize = 21;
-const N_LOOKAHEAD: usize = 1000;
+const N_LOOKAHEAD: usize = 2000;
 const THRUST: Precision = 2.0;
 
 // Bodies have a mass, an id, a current state and a rolling history of states
@@ -23,10 +24,10 @@ struct Body {
 
 #[derive(Copy, Clone)]
 struct State {
-    x: Precision,
-    y: Precision,
     vx: Precision,
     vy: Precision,
+    x: Precision,
+    y: Precision,
 }
 
 impl State {
@@ -77,27 +78,81 @@ impl Body {
     }
 }
 
-fn integrate_state(state: State, thrust: i8) -> State {
-    let r = (state.x * state.x + state.y * state.y).sqrt();
+struct Forcing {
+    ax: Precision,
+    ay: Precision,
+    vy: Precision,
+    vx: Precision
+}
 
+impl ops::Add<&Forcing> for &State {
+    type Output = State;
+
+    fn add(self, rhs: &Forcing) -> Self::Output {
+        State {
+            x: self.x + rhs.vx,
+            y: self.y + rhs.vy,
+            vx: self.vx + rhs.ax,
+            vy: self.vy + rhs.ay,
+        }
+    }
+}
+
+impl ops::Add<&Forcing> for &Forcing {
+    type Output = Forcing;
+
+    fn add(self, rhs: &Forcing) -> Self::Output {
+        Forcing {
+            ax: self.ax + rhs.ax,
+            ay: self.ay + rhs.ay,
+            vx: self.vx + rhs.vx,
+            vy: self.vy + rhs.vy,
+        }
+    }
+}
+
+impl ops::Mul<&Forcing> for Precision  {
+    type Output = Forcing;
+
+    fn mul(self, rhs: &Forcing) -> Self::Output {
+        Self::Output {
+            ax: self * rhs.ax,
+            ay: self * rhs.ay,
+            vx: self * rhs.vx,
+            vy: self * rhs.vy,
+        }
+    }
+}
+
+fn forcing(state: State, thrust: i8) -> Forcing {
+    let r = (state.x * state.x + state.y * state.y).sqrt();
     let v = (state.vx * state.vx + state.vy * state.vy).sqrt();
 
     let f = -G * MASS_EARTH / (r * r * r);
 
-
     let thrustx = thrust as Precision * THRUST * state.vx / v;
     let thrusty = thrust as Precision * THRUST * state.vy / v;
 
-
-    let ax = f * state.x + thrustx;
+    let ax = f * state.x + thrustx; 
     let ay = f * state.y + thrusty;
 
-    let vx = state.vx + ax * DT;
-    let vy = state.vy + ay * DT;
-    let x = state.x + state.vx * DT + 0.5 * ax * DT * DT;
-    let y = state.y + state.vy * DT + 0.5 * ay * DT * DT;  
+    Forcing {
+        ax,
+        ay,
+        vx: state.vx,
+        vy: state.vy,
+    }
+}
 
-    State::new(x, y, vx, vy)
+fn rk4(state: State, thrust: i8) -> State {
+
+    let k1 = forcing(state, thrust);
+    let k2 = forcing(&state + &(0.5 * DT * &k1), thrust);
+    let k3 = forcing(&state + &(0.5 * DT * &k2), thrust);
+    let k4 = forcing(&state + &(DT * &k3), thrust);
+
+    // Need to make this better without borrowing
+    &state +  &(DT / 6.0 *  &(&k1 + &(&(2.0 * &k2) +  &(&(2.0 * &k3) + &k4))))
 }
 
 fn add_body(mut commands: Commands) {
@@ -133,7 +188,7 @@ fn system(
             body_radius = 100000.0;
         } 
 
-        let mut new_state = integrate_state(body.current_state, thrust);
+        let mut new_state = rk4(body.current_state, thrust);
        
         body.current_state = new_state.clone();
 
@@ -164,7 +219,7 @@ fn system(
 
         // draw lookahead assuming no thrust
         for _ in 0..N_LOOKAHEAD {
-            new_state = integrate_state(new_state, 0);
+            new_state = rk4(new_state, 0);
             gizmos.circle_2d(
                 Vec2 {
                     x: new_state.x as f32,
